@@ -13,6 +13,24 @@
     Version: 2.0 (GUI Edition)
 #>
 
+# Try to hide the PowerShell console window
+try {
+    Add-Type -Name Window -Namespace Console -MemberDefinition '
+    [DllImport("Kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
+    ' -ErrorAction SilentlyContinue
+
+    $consolePtr = [Console.Window]::GetConsoleWindow()
+    if ($consolePtr -ne [IntPtr]::Zero) {
+        [Console.Window]::ShowWindow($consolePtr, 0) | Out-Null
+    }
+} catch {
+    # If console hiding fails, continue anyway
+}
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
@@ -55,6 +73,25 @@ $script:robocopyProcess = $null
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
+
+function Enable-LongPaths {
+    try {
+        # Check if already enabled
+        $currentValue = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -ErrorAction SilentlyContinue
+        
+        if ($currentValue.LongPathsEnabled -eq 1) {
+            return $true
+        }
+        
+        # Try to enable it
+        New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force -ErrorAction Stop | Out-Null
+        
+        return $true
+        
+    } catch {
+        return $false
+    }
+}
 
 function Get-BackupDrive {
     $scriptDrive = Split-Path -Qualifier $PSScriptRoot
@@ -385,8 +422,10 @@ function Invoke-BackupWithProgress {
             
             # Check for path length issues
             if ($exitCode -eq 8 -or $exitCode -eq 16) {
-                Update-Status "[WARN] This may be due to long file paths in OneDrive folders" "Orange"
-                Update-Status "[TIP] Try using a shorter backup folder name (e.g., 'BK' instead of 'Backup')" "Yellow"
+                Update-Status "[WARN] Some files exceed Windows 260-character path limit" "Orange"
+                Update-Status "[TIP] Enable Long Paths: Run as Admin in PowerShell:" "Yellow"
+                Update-Status "      New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name 'LongPathsEnabled' -Value 1 -Force" "White"
+                Update-Status "[TIP] Or backup specific subfolders with shorter paths" "Yellow"
             }
             
             $failedBackups += $source
@@ -438,11 +477,17 @@ function Invoke-BackupWithProgress {
                     $progressCurrent.Value = [int](($itemCount / $itemsToCompress.Count) * 100)
                     Update-Status "  Adding: $($item.Name)" "Black"
                     
+                    # Keep UI responsive
+                    [System.Windows.Forms.Application]::DoEvents()
+                    
                     if (Test-Path $archivePath) {
                         Compress-Archive -Path $item.FullName -DestinationPath $archivePath -Update -ErrorAction Stop
                     } else {
                         Compress-Archive -Path $item.FullName -DestinationPath $archivePath -ErrorAction Stop
                     }
+                    
+                    # Keep UI responsive after compression
+                    [System.Windows.Forms.Application]::DoEvents()
                 }
                 
                 if (-not $script:cancelRequested) {
@@ -966,5 +1011,17 @@ if ($script:backupDrive) {
 # ============================================================================
 # SHOW FORM
 # ============================================================================
+
+# Add event handler for when form is shown
+$form.Add_Shown({
+    # Try to enable Long Paths support on startup
+    $longPathsEnabled = Enable-LongPaths
+    if ($longPathsEnabled) {
+        Update-Status "[OK] Windows Long Paths support is enabled" "Green"
+    } else {
+        Update-Status "[WARN] Could not enable Long Paths - some deep folders may fail" "Orange"
+    }
+    Update-Status "" "Black"
+})
 
 [void]$form.ShowDialog()
